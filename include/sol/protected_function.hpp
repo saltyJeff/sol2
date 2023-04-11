@@ -41,7 +41,7 @@ namespace sol {
 	namespace detail {
 		template <bool ShouldPush_, typename Handler_>
 		inline void handle_protected_exception(
-		     lua_State* L_, optional<const std::exception&> maybe_ex, const char* error, detail::protected_handler<ShouldPush_, Handler_>& handler_) {
+		     lua_State* L_, std::exception_ptr maybe_ex, const char* error, detail::protected_handler<ShouldPush_, Handler_>& handler_) {
 			handler_.stack_index = 0;
 			if (ShouldPush_) {
 				handler_.target.push(L_);
@@ -348,34 +348,40 @@ namespace sol {
 				returncount = poststacksize - (firstreturn - 1);
 #if SOL_IS_ON(SOL_EXCEPTIONS) && SOL_IS_OFF(SOL_PROPAGATE_EXCEPTIONS)
 			}
-			// Handle C++ errors thrown from C++ functions bound inside of lua
-			catch (const char* error) {
-				detail::handle_protected_exception(lua_state(), optional<const std::exception&>(nullopt), error, h);
-				firstreturn = lua_gettop(lua_state());
-				return protected_function_result(lua_state(), firstreturn, 0, 1, call_status::runtime);
-			}
-			catch (const std::string& error) {
-				detail::handle_protected_exception(lua_state(), optional<const std::exception&>(nullopt), error.c_str(), h);
-				firstreturn = lua_gettop(lua_state());
-				return protected_function_result(lua_state(), firstreturn, 0, 1, call_status::runtime);
-			}
-			catch (const std::exception& error) {
-				detail::handle_protected_exception(lua_state(), optional<const std::exception&>(error), error.what(), h);
-				firstreturn = lua_gettop(lua_state());
-				return protected_function_result(lua_state(), firstreturn, 0, 1, call_status::runtime);
-			}
+			catch(...) {
+				std::exception_ptr eptr = std::current_exception();
+				try {
+					std::rethrow_exception(eptr);
+				}
+				// Handle C++ errors thrown from C++ functions bound inside of lua
+				catch (const char* error) {
+					detail::handle_protected_exception(lua_state(), eptr, error, h);
+					firstreturn = lua_gettop(lua_state());
+					return protected_function_result(lua_state(), firstreturn, 0, 1, call_status::runtime);
+				}
+				catch (const std::string& error) {
+					detail::handle_protected_exception(lua_state(), eptr, error.c_str(), h);
+					firstreturn = lua_gettop(lua_state());
+					return protected_function_result(lua_state(), firstreturn, 0, 1, call_status::runtime);
+				}
+				catch (const std::exception& error) {
+					detail::handle_protected_exception(lua_state(), eptr, error.what(), h);
+					firstreturn = lua_gettop(lua_state());
+					return protected_function_result(lua_state(), firstreturn, 0, 1, call_status::runtime);
+				}
 #if SOL_IS_ON(SOL_EXCEPTIONS_CATCH_ALL)
-			// LuaJIT cannot have the catchall when the safe propagation is on
-			// but LuaJIT will swallow all C++ errors
-			// if we don't at least catch std::exception ones
-			catch (...) {
-				detail::handle_protected_exception(lua_state(), optional<const std::exception&>(nullopt), detail::protected_function_error, h);
-				firstreturn = lua_gettop(lua_state());
-				return protected_function_result(lua_state(), firstreturn, 0, 1, call_status::runtime);
-			}
+				// LuaJIT cannot have the catchall when the safe propagation is on
+				// but LuaJIT will swallow all C++ errors
+				// if we don't at least catch std::exception ones
+				catch (...) {
+					detail::handle_protected_exception(lua_state(), eptr, detail::protected_function_error, h);
+					firstreturn = lua_gettop(lua_state());
+					return protected_function_result(lua_state(), firstreturn, 0, 1, call_status::runtime);
+				}
 #endif // Always catch edge case
+			}
 #else
-			// do not handle exceptions: they can be propogated into C++ and keep all type information / rich information
+		// do not handle exceptions: they can be propogated into C++ and keep all type information / rich information
 #endif // Exceptions vs. No Exceptions
 			return protected_function_result(lua_state(), firstreturn, returncount, returncount, code);
 		}

@@ -37,7 +37,7 @@ namespace sol {
 	// must push a single object to be the error object
 	// NOTE: the VAST MAJORITY of all Lua libraries -- C or otherwise -- expect a string for the type of error
 	// break this convention at your own risk
-	using exception_handler_function = int (*)(lua_State*, optional<const std::exception&>, string_view);
+	using exception_handler_function = int (*)(lua_State*, std::exception_ptr, string_view);
 
 	namespace detail {
 		inline const char (&default_exception_handler_name())[11] {
@@ -46,7 +46,7 @@ namespace sol {
 		}
 
 		// must push at least 1 object on the stack
-		inline int default_exception_handler(lua_State* L, optional<const std::exception&>, string_view what) {
+		inline int default_exception_handler(lua_State* L, std::exception_ptr eptr, string_view what) {
 #if SOL_IS_ON(SOL_PRINT_ERRORS)
 			std::cerr << "[sol2] An exception occurred: ";
 			std::cerr.write(what.data(), static_cast<std::streamsize>(what.size()));
@@ -56,20 +56,20 @@ namespace sol {
 			return 1;
 		}
 
-		inline int call_exception_handler(lua_State* L, optional<const std::exception&> maybe_ex, string_view what) {
+		inline int call_exception_handler(lua_State* L, std::exception_ptr maybe_ex, string_view what) {
 			lua_getglobal(L, default_exception_handler_name());
 			type t = static_cast<type>(lua_type(L, -1));
 			if (t != type::lightuserdata) {
 				lua_pop(L, 1);
-				return default_exception_handler(L, std::move(maybe_ex), std::move(what));
+				return default_exception_handler(L, maybe_ex, std::move(what));
 			}
 			void* vfunc = lua_touserdata(L, -1);
 			lua_pop(L, 1);
 			if (vfunc == nullptr) {
-				return default_exception_handler(L, std::move(maybe_ex), std::move(what));
+				return default_exception_handler(L, maybe_ex, std::move(what));
 			}
 			exception_handler_function exfunc = reinterpret_cast<exception_handler_function>(vfunc);
-			return exfunc(L, std::move(maybe_ex), std::move(what));
+			return exfunc(L, maybe_ex, std::move(what));
 		}
 
 #if SOL_IS_OFF(SOL_EXCEPTIONS)
@@ -107,25 +107,31 @@ namespace sol {
 			try {
 				return f(L);
 			}
-			catch (const char* cs) {
-				call_exception_handler(L, optional<const std::exception&>(nullopt), string_view(cs));
-			}
-			catch (const std::string& s) {
-				call_exception_handler(L, optional<const std::exception&>(nullopt), string_view(s.c_str(), s.size()));
-			}
-			catch (const std::exception& e) {
-				call_exception_handler(L, optional<const std::exception&>(e), e.what());
-			}
+			catch(...) {
+				std::exception_ptr eptr = std::current_exception();
+				try {
+					std::rethrow_exception(eptr);
+				}
+				catch (const char* cs) {
+					call_exception_handler(L, eptr, string_view(cs));
+				}
+				catch (const std::string& s) {
+					call_exception_handler(L, eptr, string_view(s.c_str(), s.size()));
+				}
+				catch (const std::exception& e) {
+					call_exception_handler(L, eptr, e.what());
+				}
 #if SOL_IS_ON(SOL_EXCEPTIONS_CATCH_ALL)
-			// LuaJIT cannot have the catchall when the safe propagation is on
-			// but LuaJIT will swallow all C++ errors
-			// if we don't at least catch std::exception ones
-			catch (...) {
-				call_exception_handler(L, optional<const std::exception&>(nullopt), "caught (...) exception");
-			}
+				// LuaJIT cannot have the catchall when the safe propagation is on
+				// but LuaJIT will swallow all C++ errors
+				// if we don't at least catch std::exception ones
+				catch (...) {
+					call_exception_handler(L, eptr, "caught (...) exception");
+				}
 #endif // LuaJIT cannot have the catchall, but we must catch std::exceps for it
-			return lua_error(L);
+				return lua_error(L);
 #endif // Safe exceptions
+			}
 		}
 
 		template <lua_CFunction f>
@@ -155,27 +161,33 @@ namespace sol {
 				return f(L, std::forward<Args>(args)...);
 #else
 				try {
-					return f(L, std::forward<Args>(args)...);
+					return f(L);
 				}
-				catch (const char* cs) {
-					call_exception_handler(L, optional<const std::exception&>(nullopt), string_view(cs));
-				}
-				catch (const std::string& s) {
-					call_exception_handler(L, optional<const std::exception&>(nullopt), string_view(s.c_str(), s.size()));
-				}
-				catch (const std::exception& e) {
-					call_exception_handler(L, optional<const std::exception&>(e), e.what());
-				}
+				catch(...) {
+					std::exception_ptr eptr = std::current_exception();
+					try {
+						std::rethrow_exception(eptr);
+					}
+					catch (const char* cs) {
+						call_exception_handler(L, eptr, string_view(cs));
+					}
+					catch (const std::string& s) {
+						call_exception_handler(L, eptr, string_view(s.c_str(), s.size()));
+					}
+					catch (const std::exception& e) {
+						call_exception_handler(L, eptr, e.what());
+					}
 #if SOL_IS_ON(SOL_EXCEPTIONS_CATCH_ALL)
-				// LuaJIT cannot have the catchall when the safe propagation is on
-				// but LuaJIT will swallow all C++ errors
-				// if we don't at least catch std::exception ones
-				catch (...) {
-					call_exception_handler(L, optional<const std::exception&>(nullopt), "caught (...) exception");
+					// LuaJIT cannot have the catchall when the safe propagation is on
+					// but LuaJIT will swallow all C++ errors
+					// if we don't at least catch std::exception ones
+					catch (...) {
+						call_exception_handler(L, eptr, "caught (...) exception");
+					}
+#endif // LuaJIT cannot have the catchall, but we must catch std::exceps for it
+					return lua_error(L);
 				}
-#endif
-				return lua_error(L);
-#endif
+#endif // Safe exceptions
 			}
 		}
 
